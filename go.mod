@@ -1,4 +1,4 @@
-module github.com/snabb/sitemap
+module github.com/dreamsxin/go-sitemap
 
 go 1.19
 
