@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/go-test/deep"
-	"github.com/snabb/sitemap"
+	"github.com/dreamsxin/go-sitemap"
 )
 
 // This is a web server that implements two request paths /foo and /bar

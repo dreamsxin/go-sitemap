@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-test/deep"
-	"github.com/snabb/sitemap"
+	"github.com/dreamsxin/go-sitemap"
 )
 
 // Sitemap index with one sitemap URL.

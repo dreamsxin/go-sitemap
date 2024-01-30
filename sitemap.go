@@ -45,8 +45,9 @@ type URL struct {
 // attribute correctly. Minify can be set to make the output less human
 // readable.
 type Sitemap struct {
-	XMLName xml.Name `xml:"urlset"`
-	Xmlns   string   `xml:"xmlns,attr"`
+	SkipWriteHeader bool
+	XMLName         xml.Name `xml:"urlset"`
+	Xmlns           string   `xml:"xmlns,attr"`
 
 	URLs []*URL `xml:"url"`
 
@@ -71,9 +72,11 @@ func (s *Sitemap) Add(u *URL) {
 func (s *Sitemap) WriteTo(w io.Writer) (n int64, err error) {
 	cw := diagio.NewCounterWriter(w)
 
-	_, err = cw.Write([]byte(xml.Header))
-	if err != nil {
-		return cw.Count(), err
+	if !s.SkipWriteHeader {
+		_, err = cw.Write([]byte(xml.Header))
+		if err != nil {
+			return cw.Count(), err
+		}
 	}
 	en := xml.NewEncoder(cw)
 	if !s.Minify {
