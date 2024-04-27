@@ -45,7 +45,7 @@ type URL struct {
 // attribute correctly. Minify can be set to make the output less human
 // readable.
 type Sitemap struct {
-	SkipWriteHeader bool
+	SkipWriteHeader bool  `xml:"-"`
 	XMLName         xml.Name `xml:"urlset"`
 	Xmlns           string   `xml:"xmlns,attr"`
 
