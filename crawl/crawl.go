@@ -75,6 +75,7 @@ func NewDomainCrawler(root *url.URL, config *Config) (*DomainCrawler, error) {
 		siteMap.sitemapURLS = config.SitemapURLS
 
 		for _, sitemapURL := range siteMap.sitemapURLS {
+			siteMap.siteURLS[sitemapURL.Loc] = true
 			loc, err := url.Parse(sitemapURL.Loc)
 			if err == nil {
 				pendingURLS <- loc
