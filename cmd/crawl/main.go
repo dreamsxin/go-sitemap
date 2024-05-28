@@ -5,8 +5,10 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dreamsxin/go-sitemap"
@@ -18,8 +20,10 @@ const concurrency int = 8
 const crawlTimeout time.Duration = 0
 const timeout time.Duration = 30 * time.Second
 const keepAlive time.Duration = crawl.DefaultKeepAlive
+const interval time.Duration = 48 * time.Hour
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	urlPtr := flag.String("u", "", "url to crawl (required)")
 	concPtr := flag.Int("c", concurrency, "maximum concurrency")
 	crawlTimeoutPtr := flag.Duration("w", crawlTimeout, "maximum crawl time")
@@ -29,6 +33,7 @@ func main() {
 	debugPtr := flag.Bool("d", false, "enable debug logs")
 	outfile := flag.String("o", "sitemap.xml", "output file name")
 	xmlheader := flag.String("h", "", "xml header")
+	intervalPtr := flag.Duration("i", interval, "change frequency interval")
 
 	flag.Parse()
 
@@ -53,6 +58,28 @@ func main() {
 		log.Fatalf("error: %s", loggerErr)
 	}
 
+	if *outfile == "" {
+		log.Fatal("output file name cant't empay")
+	}
+
+	oldurls := make(map[string]*sitemap.URL)
+	if *intervalPtr > 0 {
+		// 读取文件内容
+		file, err := os.OpenFile(*outfile, os.O_RDONLY, os.ModePerm)
+		if err != nil {
+			log.Printf("error: %s\n", err)
+		} else {
+			defer file.Close()
+			sm := sitemap.New()
+			sm.ReadFrom(file)
+
+			for _, v := range sm.URLs {
+				oldurls[v.Loc] = v
+			}
+		}
+	}
+
+	nowtime := time.Now()
 	siteMap, siteMapErr := crawl.CrawlDomain(
 		*urlPtr,
 		crawl.SetMaxConcurrency(*concPtr),
@@ -61,6 +88,21 @@ func main() {
 		crawl.SetTimeout(*timeoutPtr),
 		crawl.SetClient(client),
 		crawl.SetLogger(logger),
+		crawl.SetSitemapURLS(oldurls),
+		crawl.SetCrawlValidator(func(pageURL *url.URL) bool {
+			urlString := strings.TrimRight(pageURL.String(), "/")
+			v, ok := oldurls[urlString]
+			if ok {
+				sub := nowtime.Sub(*v.LastMod)
+				if sub < *intervalPtr {
+					logger.Debug("validate url failed (url is not changed)",
+						zap.String("url", urlString),
+					)
+					return false
+				}
+			}
+			return true
+		}),
 	)
 
 	if siteMapErr != nil {
@@ -68,9 +110,6 @@ func main() {
 	}
 	//siteMap.WriteMap(os.Stdout)
 
-	if *outfile == "" {
-		log.Fatal("output file name cant't empay")
-	}
 	file, err := os.OpenFile(*outfile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.ModePerm)
 	if err != nil {
 		log.Fatalf("error: %s", err)

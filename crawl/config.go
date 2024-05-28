@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dreamsxin/go-sitemap"
 	"go.uber.org/zap"
 )
 
@@ -40,8 +41,10 @@ type Config struct {
 	Timeout         time.Duration
 	Client          *http.Client
 	Logger          *zap.Logger
+	CrawlValidator  CrawlValidator
 	DomainValidator DomainValidator
 	Priority        Priority
+	SitemapURLS     map[string]*sitemap.URL
 }
 
 // NewConfig creates a config from the specified options, and provides
@@ -55,6 +58,7 @@ func NewConfig(options ...Option) *Config {
 		Timeout:         DefaultTimeout,
 		Client:          nil,
 		Logger:          nil,
+		CrawlValidator:  nil,
 		DomainValidator: nil,
 	}
 
@@ -140,6 +144,12 @@ func (o optionFunc) apply(config *Config) {
 	o(config)
 }
 
+func SetSitemapURLS(urls map[string]*sitemap.URL) Option {
+	return optionFunc(func(config *Config) {
+		config.SitemapURLS = urls
+	})
+}
+
 // SetMaxConcurrency sets the number of goroutines that will be used. This is
 // also used to configure the default http client with enough open connections
 // to support this number of goroutines.
@@ -208,6 +218,12 @@ func SetClient(client *http.Client) Option {
 func SetLogger(logger *zap.Logger) Option {
 	return optionFunc(func(config *Config) {
 		config.Logger = logger
+	})
+}
+
+func SetCrawlValidator(validator CrawlValidator) Option {
+	return optionFunc(func(config *Config) {
+		config.CrawlValidator = validator
 	})
 }
 

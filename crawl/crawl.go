@@ -71,6 +71,18 @@ func NewDomainCrawler(root *url.URL, config *Config) (*DomainCrawler, error) {
 	var pendingURLSRemaining sync.WaitGroup
 	pendingURLSRemaining.Add(1)
 
+	if config.SitemapURLS != nil {
+		siteMap.sitemapURLS = config.SitemapURLS
+
+		for _, sitemapURL := range siteMap.sitemapURLS {
+			loc, err := url.Parse(sitemapURL.Loc)
+			if err == nil {
+				pendingURLS <- loc
+				pendingURLSRemaining.Add(1)
+			}
+		}
+	}
+
 	return &DomainCrawler{
 		root:                 root,
 		config:               config,
@@ -116,6 +128,7 @@ func (crawler *DomainCrawler) Crawl() (*SiteMap, error) {
 func (crawler *DomainCrawler) drainURLS() {
 	client := crawler.config.Client
 	logger := crawler.config.Logger
+	validator := crawler.config.CrawlValidator
 
 	for pageURL := range crawler.pendingURLS {
 		logger.Debug("crawling page for links",
@@ -124,6 +137,10 @@ func (crawler *DomainCrawler) drainURLS() {
 
 		if crawler.timedOut.Load() {
 			logger.Debug("skipping url due to timeout",
+				zap.String("url", pageURL.String()),
+			)
+		} else if validator != nil && !validator(pageURL) {
+			logger.Debug("skipping url due to validator",
 				zap.String("url", pageURL.String()),
 			)
 		} else {
@@ -199,6 +216,8 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 		}
 	}
 }
+
+type CrawlValidator func(pageURL *url.URL) bool
 
 // A DomainValidator provides a Validate functions for comparing two URLs
 // for same domain inclusion. This allows for custom behavior such as checking
