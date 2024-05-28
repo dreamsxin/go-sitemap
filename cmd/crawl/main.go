@@ -93,6 +93,9 @@ func main() {
 			urlString := strings.TrimRight(pageURL.String(), "/")
 			v, ok := oldurls[urlString]
 			if ok {
+				if v.Priority == 1 {
+					return true
+				}
 				sub := nowtime.Sub(*v.LastMod)
 				if sub < *intervalPtr {
 					logger.Debug("validate url failed (url is not changed)",
