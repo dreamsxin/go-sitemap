@@ -96,12 +96,14 @@ func main() {
 				if v.Priority == 1 {
 					return true
 				}
-				sub := nowtime.Sub(*v.LastMod)
-				if sub < *intervalPtr {
-					logger.Debug("validate url failed (url is not changed)",
-						zap.String("url", urlString),
-					)
-					return false
+				if v.LastMod != nil {
+					sub := nowtime.Sub(*v.LastMod)
+					if sub < *intervalPtr {
+						logger.Debug("validate url failed (url is not changed)",
+							zap.String("url", urlString),
+						)
+						return false
+					}
 				}
 			}
 			return true

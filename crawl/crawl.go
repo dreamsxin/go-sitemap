@@ -145,6 +145,7 @@ func (crawler *DomainCrawler) drainURLS() {
 				zap.String("url", pageURL.String()),
 			)
 		} else {
+			crawler.siteMap.updatedMod(pageURL)
 			linkReader := NewLinkReader(pageURL, client)
 			crawler.realAllLinks(linkReader)
 			linkReader.Close()
@@ -320,20 +321,35 @@ func (s *SiteMap) appendURL(url *url.URL) bool {
 	// in a race condition, so reading again is necessary after acquiring the
 	// write lock.
 	s.rwl.Lock()
-	t := time.Now()
+	//t := time.Now()
 	crawl := !s.siteURLS[urlString]
 	s.siteURLS[urlString] = true
 
 	urlString = strings.TrimRight(urlString, "/")
 
 	s.sitemapURLS[urlString] = &sitemap.URL{
-		Loc:        urlString,
-		LastMod:    &t,
+		Loc: urlString,
+		//LastMod:    &t,
 		ChangeFreq: sitemap.Daily,
 		Priority:   s.priority.Get(url),
 	}
 	s.rwl.Unlock()
 	return crawl
+}
+func (s *SiteMap) updatedMod(url *url.URL) bool {
+
+	urlString := url.String()
+
+	s.rwl.Lock()
+	defer s.rwl.Unlock()
+	val := s.sitemapURLS[urlString]
+	if val != nil {
+		t := time.Now()
+		val.LastMod = &t
+		return true
+	}
+
+	return false
 }
 
 // WriteMap writes the ordered site map to a given writer.
