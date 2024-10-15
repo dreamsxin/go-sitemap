@@ -15,6 +15,10 @@ crawl -u http://example.com -o sitemap.xml
 crawl -u http://example.com -o sitemap.xml -c 1
 ```
 
+### example
+
+- https://github.com/dreamsxin/go-sitemap/tree/master/cmd/crawl
+
 License
 -------
 
