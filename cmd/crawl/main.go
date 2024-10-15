@@ -5,10 +5,8 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/dreamsxin/go-sitemap"
@@ -89,10 +87,8 @@ func main() {
 		crawl.SetClient(client),
 		crawl.SetLogger(logger),
 		crawl.SetSitemapURLS(oldurls),
-		crawl.SetCrawlValidator(func(pageURL *url.URL) bool {
-			urlString := strings.TrimRight(pageURL.String(), "/")
-			v, ok := oldurls[urlString]
-			if ok {
+		crawl.SetCrawlValidator(func(v *sitemap.URL) bool {
+			if v != nil {
 				if v.Priority == 1 {
 					return true
 				}
@@ -100,7 +96,7 @@ func main() {
 					sub := nowtime.Sub(*v.LastMod)
 					if sub < *intervalPtr {
 						logger.Debug("validate url failed (url is not changed)",
-							zap.String("url", urlString),
+							zap.String("url", v.Loc),
 						)
 						return false
 					}

@@ -130,17 +130,17 @@ func (crawler *DomainCrawler) drainURLS() {
 	client := crawler.config.Client
 	logger := crawler.config.Logger
 	validator := crawler.config.CrawlValidator
-
 	for pageURL := range crawler.pendingURLS {
 		logger.Debug("crawling page for links",
 			zap.String("url", pageURL.String()),
 		)
 
+		siteurl, ok := crawler.siteMap.GetURL(pageURL)
 		if crawler.timedOut.Load() {
 			logger.Debug("skipping url due to timeout",
 				zap.String("url", pageURL.String()),
 			)
-		} else if validator != nil && !validator(pageURL) {
+		} else if ok && validator != nil && !validator(siteurl) {
 			logger.Debug("skipping url due to validator",
 				zap.String("url", pageURL.String()),
 			)
@@ -219,7 +219,7 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 	}
 }
 
-type CrawlValidator func(pageURL *url.URL) bool
+type CrawlValidator func(pageURL *sitemap.URL) bool
 
 // A DomainValidator provides a Validate functions for comparing two URLs
 // for same domain inclusion. This allows for custom behavior such as checking
@@ -291,6 +291,16 @@ func NewSiteMap(url *url.URL, validator DomainValidator, priority Priority) *Sit
 		validator:   validator,
 		priority:    priority,
 	}
+}
+
+func (s *SiteMap) GetURL(url *url.URL) (*sitemap.URL, bool) {
+
+	urlString := url.String()
+
+	s.rwl.RLock()
+	defer s.rwl.RUnlock()
+	ret, ok := s.sitemapURLS[urlString]
+	return ret, ok
 }
 
 // appendURL returns true if the url should be crawled. If true is returned
