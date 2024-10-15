@@ -159,6 +159,7 @@ func (crawler *DomainCrawler) drainURLS() {
 // into the domain crawler's pending URL channel for crawling.
 func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 	logger := crawler.config.Logger
+	callback := crawler.config.EventCallbackReadLink
 
 	for {
 		hrefString, hrefErr := linkReader.Read()
@@ -215,6 +216,9 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 					zap.String("link", linkReader.URL()),
 				)
 			}
+			if callback != nil {
+				callback(hrefResolved, linkReader)
+			}
 		}
 	}
 }
@@ -269,6 +273,8 @@ func GetPriority(link *url.URL) float32 {
 		return 0.4
 	}
 }
+
+type EventCallbackReadLink func(pageURL *url.URL, linkReader *LinkReader)
 
 // SiteMap contains the state of a site map.
 type SiteMap struct {

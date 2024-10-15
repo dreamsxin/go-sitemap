@@ -5,8 +5,10 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dreamsxin/go-sitemap"
@@ -103,6 +105,14 @@ func main() {
 				}
 			}
 			return true
+		}),
+		crawl.SetEventCallbackReadLink(func(hrefResolved *url.URL, linkReader *crawl.LinkReader) {
+			if strings.Contains(hrefResolved.Path, "/404") {
+				logger.Debug("Read",
+					zap.String("page", hrefResolved.String()),
+					zap.String("link", linkReader.URL()),
+				)
+			}
 		}),
 	)
 

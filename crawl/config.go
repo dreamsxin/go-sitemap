@@ -34,17 +34,18 @@ const DefaultKeepAlive = time.Second * 30
 
 // Config is a stuct of crawler configuration options.
 type Config struct {
-	MaxConcurrency  int
-	MaxPendingURLS  int
-	CrawlTimeout    time.Duration
-	KeepAlive       time.Duration
-	Timeout         time.Duration
-	Client          *http.Client
-	Logger          *zap.Logger
-	CrawlValidator  CrawlValidator
-	DomainValidator DomainValidator
-	Priority        Priority
-	SitemapURLS     map[string]*sitemap.URL
+	MaxConcurrency        int
+	MaxPendingURLS        int
+	CrawlTimeout          time.Duration
+	KeepAlive             time.Duration
+	Timeout               time.Duration
+	Client                *http.Client
+	Logger                *zap.Logger
+	CrawlValidator        CrawlValidator
+	DomainValidator       DomainValidator
+	EventCallbackReadLink EventCallbackReadLink
+	Priority              Priority
+	SitemapURLS           map[string]*sitemap.URL
 }
 
 // NewConfig creates a config from the specified options, and provides
@@ -246,4 +247,10 @@ func SetPriority(priority Priority) Option {
 // redirects.
 func overrideRedirect(req *http.Request, via []*http.Request) error {
 	return http.ErrUseLastResponse
+}
+
+func SetEventCallbackReadLink(callback EventCallbackReadLink) Option {
+	return optionFunc(func(config *Config) {
+		config.EventCallbackReadLink = callback
+	})
 }
