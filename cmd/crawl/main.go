@@ -154,6 +154,8 @@ func main() {
 			hasQueyry := "noquery"
 			if link.RawQuery != "" {
 				hasQueyry = "hasquery"
+			} else if link.Fragment != "" {
+				hasQueyry = "hasquery"
 			}
 			num := "0"
 			path := strings.Trim(link.Path, "/")
@@ -161,7 +163,6 @@ func main() {
 				parts := strings.Split(path, "/")
 				num = fmt.Sprintf("%d", len(parts))
 			}
-			log.Println("link.Path", link.Path, "num", num, "hasQueyry", hasQueyry)
 			if v, ok := priorityMap[hasQueyry][num]; ok {
 				return v
 			}
