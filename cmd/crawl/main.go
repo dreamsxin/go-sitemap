@@ -151,20 +151,27 @@ func main() {
 			if link == nil {
 				return 0.0
 			}
-			hasQueyry := "noquery"
-			if link.RawQuery != "" {
-				hasQueyry = "hasquery"
-			} else if link.Fragment != "" {
-				hasQueyry = "hasquery"
-			}
 			num := "0"
 			path := strings.Trim(link.Path, "/")
 			if path != "" {
 				parts := strings.Split(path, "/")
 				num = fmt.Sprintf("%d", len(parts))
 			}
-			if v, ok := priorityMap[hasQueyry][num]; ok {
-				return v
+			if link.RawQuery != "" {
+				if v, ok := priorityMap["hasquery"][num]; ok {
+					return v
+				}
+			} else if link.Fragment != "" {
+				if v, ok := priorityMap["hasfragment"][num]; ok {
+					return v
+				}
+				if v, ok := priorityMap["hasquery"][num]; ok {
+					return v
+				}
+			} else {
+				if v, ok := priorityMap["noquery"][num]; ok {
+					return v
+				}
 			}
 
 			// 默认值
