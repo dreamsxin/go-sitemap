@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -34,12 +36,41 @@ func main() {
 	outfile := flag.String("o", "sitemap.xml", "output file name")
 	xmlheader := flag.String("h", "", "xml header")
 	intervalPtr := flag.Duration("i", interval, "change frequency interval")
+	priorityfile := flag.String("p", "", "priority file")
 
 	flag.Parse()
 
 	if *urlPtr == "" {
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	/*{
+	    "default": {
+	        "default": 0.4
+	    },
+	    "noquery": {
+	        "0": 1.0,
+	        "1": 0.9,
+	        "2": 0.8,
+	        "3": 0.6,
+	        "4": 0.4
+	    },
+	    "hasquery": {
+	        "0": 0.7,
+	        "1": 0.7,
+	        "2": 0.4,
+	        "3": 0.2,
+	        "4": 0.1
+	    }
+	}*/
+	priorityMap := map[string]map[string]float32{}
+	if *priorityfile != "" {
+		b, err := os.ReadFile(*priorityfile)
+		if err != nil {
+			log.Fatalf("read priority file error: %s", err)
+		}
+		json.Unmarshal(b, &priorityMap)
 	}
 
 	client := &http.Client{
@@ -80,8 +111,7 @@ func main() {
 	}
 
 	nowtime := time.Now()
-	siteMap, siteMapErr := crawl.CrawlDomain(
-		*urlPtr,
+	options := []crawl.Option{
 		crawl.SetMaxConcurrency(*concPtr),
 		crawl.SetCrawlTimeout(*crawlTimeoutPtr),
 		crawl.SetKeepAlive(*keepAlivePtr),
@@ -114,6 +144,34 @@ func main() {
 				)
 			}
 		}),
+	}
+
+	if len(priorityMap) > 0 {
+		options = append(options, crawl.SetPriority(crawl.PriorityFunc(func(link *url.URL) float32 {
+			if link == nil {
+				return 0.0
+			}
+			hasQueyry := "noquery"
+			if link.RawQuery != "" {
+				hasQueyry = "hasquery"
+			}
+			parts := strings.Split(strings.TrimRight(link.Path, "/"), "/")
+			num := fmt.Sprintf("%d", len(parts))
+			if v, ok := priorityMap[hasQueyry][num]; ok {
+				return v
+			}
+
+			// 默认值
+			if v, ok := priorityMap["default"]["default"]; ok {
+				return v
+			}
+
+			return 0.4
+		})))
+	}
+	siteMap, siteMapErr := crawl.CrawlDomain(
+		*urlPtr,
+		options...,
 	)
 
 	if siteMapErr != nil {

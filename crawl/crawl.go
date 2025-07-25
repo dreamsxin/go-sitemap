@@ -260,6 +260,9 @@ func (p PriorityFunc) Get(link *url.URL) float32 {
 }
 
 func GetPriority(link *url.URL) float32 {
+	if link == nil {
+		return 0.0
+	}
 	parts := strings.Split(strings.TrimRight(link.Path, "/"), "/")
 	num := len(parts)
 	switch num {
