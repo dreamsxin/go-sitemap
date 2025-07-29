@@ -37,6 +37,9 @@ func main() {
 	xmlheader := flag.String("h", "", "xml header")
 	intervalPtr := flag.Duration("i", interval, "change frequency interval")
 	priorityfile := flag.String("p", "", "priority file")
+	// 忽略带有 query 的 url
+	skipquery := flag.Bool("skip-query", false, "skip query")
+	skipfragment := flag.Bool("skip-fragment", false, "skip fragment")
 
 	flag.Parse()
 
@@ -144,6 +147,18 @@ func main() {
 				)
 			}
 		}),
+	}
+
+	if *skipquery {
+		options = append(options, crawl.SetUrlValidator(crawl.UrlValidatorFunc(func(link *url.URL) bool {
+			return link.RawQuery == ""
+		})))
+	}
+
+	if *skipfragment {
+		options = append(options, crawl.SetUrlValidator(crawl.UrlValidatorFunc(func(link *url.URL) bool {
+			return link.Fragment == ""
+		})))
 	}
 
 	if len(priorityMap) > 0 {

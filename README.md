@@ -45,6 +45,18 @@ crawl -u http://example.com -o sitemap.xml -c 1
 crawl -u http://example.com -o sitemap.xml -p priority.json
 ```
 
+**skip query**
+
+```shell
+crawl -u http://example.com -o sitemap.xml -p priority.json -skip-query=true
+```
+
+**skip fragment**
+
+```shell
+crawl -u http://example.com -o sitemap.xml -p priority.json -skip-fragment=true
+```
+
 ### example
 
 - https://github.com/dreamsxin/go-sitemap/tree/master/cmd/crawl

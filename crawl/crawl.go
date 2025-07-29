@@ -63,7 +63,7 @@ func NewDomainCrawler(root *url.URL, config *Config) (*DomainCrawler, error) {
 		return nil, configError
 	}
 
-	siteMap := NewSiteMap(root, config.DomainValidator, config.Priority)
+	siteMap := NewSiteMap(root, config.DomainValidator, config.UrlValidators, config.Priority)
 
 	pendingURLS := make(chan *url.URL, config.MaxPendingURLS)
 	pendingURLS <- root
@@ -225,6 +225,16 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 
 type CrawlValidator func(pageURL *sitemap.URL) bool
 
+type UrlValidator interface {
+	Validate(link *url.URL) bool
+}
+
+type UrlValidatorFunc func(link *url.URL) bool
+
+func (v UrlValidatorFunc) Validate(link *url.URL) bool {
+	return v(link)
+}
+
 // A DomainValidator provides a Validate functions for comparing two URLs
 // for same domain inclusion. This allows for custom behavior such as checking
 // scheme (http vs https) or DNS lookup.
@@ -285,24 +295,26 @@ type EventCallbackReadLink func(pageURL *url.URL, linkReader *LinkReader)
 
 // SiteMap contains the state of a site map.
 type SiteMap struct {
-	url         *url.URL
-	rwl         *sync.RWMutex
-	siteURLS    map[string]bool
-	sitemapURLS map[string]*sitemap.URL
-	validator   DomainValidator
-	priority    Priority
+	url             *url.URL
+	rwl             *sync.RWMutex
+	siteURLS        map[string]bool
+	sitemapURLS     map[string]*sitemap.URL
+	urlValidators   []UrlValidator
+	domainValidator DomainValidator
+	priority        Priority
 }
 
 // NewSiteMap initializes a new SiteMap anchored at the specified URL and
 // crawls with the specified HTTP client
-func NewSiteMap(url *url.URL, validator DomainValidator, priority Priority) *SiteMap {
+func NewSiteMap(url *url.URL, validator DomainValidator, urlValidators []UrlValidator, priority Priority) *SiteMap {
 	return &SiteMap{
-		url:         url,
-		rwl:         &sync.RWMutex{},
-		siteURLS:    map[string]bool{},
-		sitemapURLS: map[string]*sitemap.URL{},
-		validator:   validator,
-		priority:    priority,
+		url:             url,
+		rwl:             &sync.RWMutex{},
+		siteURLS:        map[string]bool{},
+		sitemapURLS:     map[string]*sitemap.URL{},
+		urlValidators:   urlValidators,
+		domainValidator: validator,
+		priority:        priority,
 	}
 }
 
@@ -321,8 +333,14 @@ func (s *SiteMap) GetURL(url *url.URL) (*sitemap.URL, bool) {
 // appendURL will return false.
 func (s *SiteMap) appendURL(url *url.URL) bool {
 	// We shouldn't crawl if the url is not valid or is in an external domain
-	if !s.validator.Validate(s.url, url) {
+	if !s.domainValidator.Validate(s.url, url) {
 		return false
+	}
+
+	for _, v := range s.urlValidators {
+		if !v.Validate(url) {
+			return false
+		}
 	}
 
 	urlString := url.String()

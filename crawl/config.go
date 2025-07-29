@@ -42,6 +42,7 @@ type Config struct {
 	Client                *http.Client
 	Logger                *zap.Logger
 	CrawlValidator        CrawlValidator
+	UrlValidators         []UrlValidator
 	DomainValidator       DomainValidator
 	EventCallbackReadLink EventCallbackReadLink
 	Priority              Priority
@@ -94,6 +95,7 @@ func NewConfig(options ...Option) *Config {
 	if config.DomainValidator == nil {
 		config.DomainValidator = DomainValidatorFunc(ValidateHosts)
 	}
+
 	if config.Priority == nil {
 		config.Priority = PriorityFunc(GetPriority)
 	}
@@ -234,6 +236,11 @@ func SetCrawlValidator(validator CrawlValidator) Option {
 func SetDomainValidator(validator DomainValidator) Option {
 	return optionFunc(func(config *Config) {
 		config.DomainValidator = validator
+	})
+}
+func SetUrlValidator(validator UrlValidator) Option {
+	return optionFunc(func(config *Config) {
+		config.UrlValidators = append(config.UrlValidators, validator)
 	})
 }
 
