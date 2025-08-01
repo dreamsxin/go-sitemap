@@ -2,3 +2,5 @@
 logs
 *.log
 *.xml
+*.json
+*.exe
