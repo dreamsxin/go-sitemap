@@ -204,6 +204,12 @@ func main() {
 		crawl.SetLogger(logger),
 		crawl.SetSitemapURLS(oldurls),
 		crawl.SetUrlValidator(crawl.UrlValidatorFunc(func(link *url.URL) bool {
+			if link.Path == "/404" {
+				return false
+			}
+			if strings.HasSuffix(link.Path, ".html") {
+				return false
+			}
 			if strings.Contains(link.Path, "www.") {
 				return false
 			}
