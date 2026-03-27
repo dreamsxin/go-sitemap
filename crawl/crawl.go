@@ -1,3 +1,5 @@
+// Package crawl implements the core web crawling engine for automatic sitemap generation.
+
 package crawl
 
 import (
@@ -17,11 +19,30 @@ import (
 	"golang.org/x/net/html"
 )
 
-// hrefAttr is used for matching the 'href' attribute in an 'a' tag.
+// hrefAttr is the byte slice used to match the 'href' attribute in HTML anchor tags.
+// Using a pre-allocated byte slice avoids repeated allocations during link parsing.
 var hrefAttr = []byte("href")
 
-// CrawlDomain crawls a domain provided as a string URL. It wraps a call to
-// CrawlDomainWithURL.
+// CrawlDomain crawls all pages within a domain starting from the provided root URL.
+//
+// This is the main entry point for the crawler. It accepts a URL string and
+// optional configuration options, then discovers and catalogs all reachable
+// pages within the same domain.
+//
+// Parameters:
+//   - rootURL: Starting URL for the crawl (e.g., "https://example.com")
+//   - opts: Optional configuration options (SetMaxConcurrency, SetTimeout, etc.)
+//
+// Returns:
+//   - *SiteMap: The generated sitemap containing all discovered URLs
+//   - error: Any error encountered during crawling
+//
+// Example:
+//
+//	siteMap, err := crawl.CrawlDomain("https://example.com",
+//	    crawl.SetMaxConcurrency(16),
+//	    crawl.SetTimeout(30*time.Second),
+//	)
 func CrawlDomain(rootURL string, opts ...Option) (*SiteMap, error) {
 	root, rootErr := url.Parse(rootURL)
 	if rootErr != nil {
@@ -30,8 +51,19 @@ func CrawlDomain(rootURL string, opts ...Option) (*SiteMap, error) {
 	return CrawlDomainWithURL(root, opts...)
 }
 
-// CrawlDomainWithURL crawls a domain provided as a URL and returns the
-// resulting sitemap.
+// CrawlDomainWithURL crawls all pages within a domain starting from the provided URL.
+//
+// This function is similar to CrawlDomain but accepts a parsed *url.URL instead
+// of a string. Use this when you already have a parsed URL or need to manipulate
+// the URL before crawling.
+//
+// Parameters:
+//   - root: Parsed root URL to start crawling from
+//   - opts: Optional configuration options
+//
+// Returns:
+//   - *SiteMap: The generated sitemap with all discovered URLs
+//   - error: Any error encountered during crawling
 func CrawlDomainWithURL(root *url.URL, opts ...Option) (*SiteMap, error) {
 	config := NewConfig(opts...)
 
@@ -43,20 +75,40 @@ func CrawlDomainWithURL(root *url.URL, opts ...Option) (*SiteMap, error) {
 	return crawler.Crawl()
 }
 
-// DomainCrawler contains the state of a domain web crawler. The domain crawler
-// exposes a Crawl method which proudces a site map.
+// DomainCrawler manages the state and execution of a domain-wide web crawl.
+//
+// The crawler uses a concurrent architecture with multiple goroutines processing
+// URLs from a shared queue. It maintains:
+//   - A channel of pending URLs to crawl
+//   - A wait group to track in-progress crawl operations
+//   - Atomic counters for pages accessed and timeout state
+//
+// Each DomainCrawler instance is designed for a single crawl operation.
+// For multiple crawls, create separate DomainCrawler instances.
 type DomainCrawler struct {
-	root                 *url.URL
-	config               *Config
-	siteMap              *SiteMap
-	pendingURLS          chan *url.URL
-	pendingURLSRemaining *sync.WaitGroup
-	accessedPageCount    atomic.Uint64
-	timedOut             atomic.Bool
+	root                 *url.URL        // Root URL defining the crawl domain boundary
+	config               *Config         // Crawler configuration
+	siteMap              *SiteMap        // Accumulated sitemap results
+	pendingURLS          chan *url.URL   // Queue of URLs waiting to be crawled
+	pendingURLSRemaining *sync.WaitGroup // Tracks active crawl operations
+	accessedPageCount    atomic.Uint64   // Count of successfully accessed pages
+	timedOut             atomic.Bool     // Flag indicating if crawl timeout was reached
 }
 
-// NewDomainCrawler creates a new DomainCrawler from the root url and given
-// configuration.
+// NewDomainCrawler creates and initializes a new DomainCrawler instance.
+//
+// This function validates the configuration and sets up the initial state:
+//   - Creates the URL processing channel with configured buffer size
+//   - Initializes the SiteMap with domain and URL validators
+//   - Seeds the queue with the root URL (and any pre-existing sitemap URLs)
+//
+// Parameters:
+//   - root: Root URL defining the crawl domain
+//   - config: Validated crawler configuration
+//
+// Returns:
+//   - *DomainCrawler: Initialized crawler ready to execute
+//   - error: Configuration validation error, if any
 func NewDomainCrawler(root *url.URL, config *Config) (*DomainCrawler, error) {
 	configError := config.Validate()
 	if configError != nil {
@@ -93,9 +145,26 @@ func NewDomainCrawler(root *url.URL, config *Config) (*DomainCrawler, error) {
 	}, nil
 }
 
-// Crawl reads all links in the domain with the specified concurrency and
-// returns a site map. Note that Crawl is not thread safe and each caller must
-// create a separate DomainCrawler.
+// Crawl executes the domain crawl and returns the generated sitemap.
+//
+// This method:
+//  1. Spawns worker goroutines (number configured by MaxConcurrency)
+//  2. Optionally starts a timeout goroutine if CrawlTimeout is set
+//  3. Waits for all URLs to be processed
+//  4. Returns the accumulated sitemap
+//
+// The crawl uses a producer-consumer pattern:
+//   - Worker goroutines consume URLs from the pending channel
+//   - Each worker discovers new links and adds them to the queue
+//   - The process continues until all URLs are processed or timeout occurs
+//
+// Important: Crawl is NOT thread-safe. Each caller must create a separate
+// DomainCrawler instance. Concurrent calls on the same crawler will cause
+// race conditions.
+//
+// Returns:
+//   - *SiteMap: Generated sitemap with all discovered URLs
+//   - error: Error if no pages could be accessed
 func (crawler *DomainCrawler) Crawl() (*SiteMap, error) {
 	maxConcurrency := crawler.config.MaxConcurrency
 	crawlTimeout := crawler.config.CrawlTimeout
@@ -124,8 +193,18 @@ func (crawler *DomainCrawler) Crawl() (*SiteMap, error) {
 	return crawler.siteMap, nil
 }
 
-// drainURLS reads from the the pending URLS channel and crawls the page for
-// more links
+// drainURLS is the worker goroutine that processes URLs from the pending queue.
+//
+// Each worker:
+//  1. Reads URLs from the pendingURLS channel
+//  2. Checks if the URL should be skipped (timeout or validator failure)
+//  3. Fetches the page and extracts all links
+//  4. Updates the sitemap with last-modified time if available
+//  5. Signals completion via pendingURLSRemaining
+//
+// Workers run until the channel is closed and all URLs are processed.
+// The timeout flag prevents new URLs from being crawled after the deadline,
+// but allows in-progress crawls to complete.
 func (crawler *DomainCrawler) drainURLS() {
 	client := crawler.config.Client
 	logger := crawler.config.Logger
@@ -136,6 +215,7 @@ func (crawler *DomainCrawler) drainURLS() {
 		)
 
 		siteurl, ok := crawler.siteMap.GetURL(pageURL)
+		crawler.siteMap.updatedMod(pageURL, nil)
 		if crawler.timedOut.Load() {
 			logger.Debug("skipping url due to timeout",
 				zap.String("url", pageURL.String()),
@@ -145,18 +225,36 @@ func (crawler *DomainCrawler) drainURLS() {
 				zap.String("url", pageURL.String()),
 			)
 		} else {
-			crawler.siteMap.updatedMod(pageURL)
-			linkReader := NewLinkReader(pageURL, client)
+			linkReader := NewLinkReader(pageURL, client, crawler.config)
 			crawler.realAllLinks(linkReader)
-			linkReader.Close()
+			if linkReader.lastModTime != nil {
+				crawler.siteMap.updatedMod(pageURL, linkReader.lastModTime)
+			}
 		}
 
 		crawler.pendingURLSRemaining.Done()
 	}
 }
 
-// readAllLinks pushes all previously unseen links from the given linkReader
-// into the domain crawler's pending URL channel for crawling.
+// realAllLinks reads all links from a page and queues unseen URLs for crawling.
+//
+// Note: Function name contains a typo (should be "readAllLinks") but is kept
+// for backward compatibility.
+//
+// This method:
+//  1. Iterates through all links discovered by the LinkReader
+//  2. Parses and resolves each link relative to the current page
+//  3. Checks if the link is new (not already crawled)
+//  4. Adds new links to the pending queue (if not full)
+//  5. Invokes the EventCallbackReadLink if configured
+//
+// The method handles errors gracefully:
+//   - Parse errors are logged and skipped
+//   - Read errors (except EOF) are logged as warnings
+//   - Queue overflow is logged as an error and the URL is dropped
+//
+// Parameters:
+//   - linkReader: LinkReader instance for the current page
 func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 	logger := crawler.config.Logger
 	callback := crawler.config.EventCallbackReadLink
@@ -223,52 +321,110 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 	}
 }
 
+// CrawlValidator is a function type for validating whether a URL should be crawled
+// based on its sitemap.URL metadata (e.g., priority, last-modified time).
+//
+// Return true to crawl the URL, false to skip it.
 type CrawlValidator func(pageURL *sitemap.URL) bool
 
+// UrlValidator is an interface for validating discovered URLs before crawling.
+//
+// Implementations can filter URLs based on custom criteria such as:
+//   - Presence of query parameters
+//   - Presence of URL fragments
+//   - Path patterns
+//   - Custom business logic
 type UrlValidator interface {
 	Validate(link *url.URL) bool
 }
 
+// UrlValidatorFunc is a function adapter that implements the UrlValidator interface.
+// This allows ordinary functions to be used as URL validators.
 type UrlValidatorFunc func(link *url.URL) bool
 
+// Validate calls v(link) to validate the URL.
+// This method satisfies the UrlValidator interface.
 func (v UrlValidatorFunc) Validate(link *url.URL) bool {
 	return v(link)
 }
 
-// A DomainValidator provides a Validate functions for comparing two URLs
-// for same domain inclusion. This allows for custom behavior such as checking
-// scheme (http vs https) or DNS lookup.
+// DomainValidator is an interface for validating that discovered URLs belong
+// to the same domain as the root URL.
+//
+// Implementations can use various strategies:
+//   - Simple host comparison (default)
+//   - Scheme-aware validation (http vs https)
+//   - Subdomain handling
+//   - DNS-based validation
 type DomainValidator interface {
 	Validate(root *url.URL, link *url.URL) bool
 }
 
-// DomainValidatorFunc acts as an adapter for allowing the use of ordinary
-// functions as domain validators.
+// DomainValidatorFunc is a function adapter that implements the DomainValidator interface.
+// This allows ordinary functions to be used as domain validators.
 type DomainValidatorFunc func(root, link *url.URL) bool
 
-// Validate calls v(root, link).
+// Validate calls v(root, link) to check if the link belongs to the same domain.
+// This method satisfies the DomainValidator interface.
 func (v DomainValidatorFunc) Validate(root, link *url.URL) bool {
 	return v(root, link)
 }
 
-// ValidateHosts provides a default domain validation function that compares
-// the host components of the provided URLs.
+// ValidateHosts is the default domain validation function.
+//
+// It compares only the host component of URLs, ignoring:
+//   - Scheme (http vs https)
+//   - Port numbers
+//   - Path, query, and fragment components
+//
+// This provides a simple, efficient check that works for most use cases.
+//
+// Parameters:
+//   - root: The root URL defining the domain boundary
+//   - link: The discovered link to validate
+//
+// Returns:
+//   - true if both URLs have the same host, false otherwise
 func ValidateHosts(root, link *url.URL) bool {
 	// Note: We could consider the transport to also be relevant (http vs https)
 	return root.Host == link.Host
 }
 
+// Priority is an interface for calculating URL priority values.
+//
+// Priority values range from 0.0 to 1.0 and indicate the relative importance
+// of a URL compared to other URLs on the site. Search engines use this as
+// a hint for crawl prioritization.
 type Priority interface {
 	Get(link *url.URL) float32
 }
 
+// PriorityFunc is a function adapter that implements the Priority interface.
+// This allows ordinary functions to be used as priority calculators.
 type PriorityFunc func(link *url.URL) float32
 
+// Get calls p(link) to calculate the priority value.
+// This method satisfies the Priority interface.
 func (p PriorityFunc) Get(link *url.URL) float32 {
-
 	return p(link)
 }
 
+// GetPriority calculates a default priority based on URL path depth.
+//
+// The algorithm assigns higher priority to shallower URLs:
+//   - Root (/): 1.0 - Highest priority
+//   - First level (/*): 0.8 - High priority
+//   - Second level (/*/*): 0.6 - Medium priority
+//   - Deeper (/*/*/*+): 0.4 - Lower priority
+//
+// This reflects the common pattern where important content is closer to
+// the root of the site hierarchy.
+//
+// Parameters:
+//   - link: URL to calculate priority for
+//
+// Returns:
+//   - float32: Priority value between 0.0 and 1.0
 func GetPriority(link *url.URL) float32 {
 	if link == nil {
 		return 0.0
@@ -291,21 +447,50 @@ func GetPriority(link *url.URL) float32 {
 	}
 }
 
+// EventCallbackReadLink is a callback function type invoked when a new link
+// is discovered during crawling.
+//
+// The callback receives:
+//   - pageURL: The resolved URL of the discovered link
+//   - linkReader: The LinkReader that found the link (provides access to page content)
+//
+// Use cases:
+//   - Extracting last-modified times from page content
+//   - Real-time logging of discovered URLs
+//   - Custom metadata extraction
 type EventCallbackReadLink func(pageURL *url.URL, linkReader *LinkReader)
 
-// SiteMap contains the state of a site map.
+// SiteMap maintains the state of a sitemap being built during crawling.
+//
+// The SiteMap is thread-safe and uses a read-write mutex to allow concurrent
+// access from multiple crawler goroutines. It tracks:
+//   - All discovered URLs (siteURLS)
+//   - Sitemap URL metadata (sitemapURLS)
+//   - Domain and URL validation rules
+//   - Priority calculation strategy
+//
+// The SiteMap is automatically populated by the DomainCrawler and can be
+// exported to XML format after crawling completes.
 type SiteMap struct {
-	url             *url.URL
-	rwl             *sync.RWMutex
-	siteURLS        map[string]bool
-	sitemapURLS     map[string]*sitemap.URL
-	urlValidators   []UrlValidator
-	domainValidator DomainValidator
-	priority        Priority
+	url             *url.URL                // Root URL defining the domain boundary
+	rwl             *sync.RWMutex           // Read-write mutex for thread-safe access
+	siteURLS        map[string]bool         // Set of all discovered URL strings
+	sitemapURLS     map[string]*sitemap.URL // Map of URL strings to sitemap.URL metadata
+	urlValidators   []UrlValidator          // Chain of URL validators
+	domainValidator DomainValidator         // Domain boundary validator
+	priority        Priority                // Priority calculation strategy
 }
 
-// NewSiteMap initializes a new SiteMap anchored at the specified URL and
-// crawls with the specified HTTP client
+// NewSiteMap creates and initializes a new SiteMap instance.
+//
+// Parameters:
+//   - url: Root URL defining the domain boundary
+//   - validator: Domain validator for filtering external links
+//   - urlValidators: Additional URL validators (can be nil or empty)
+//   - priority: Priority calculation strategy
+//
+// Returns:
+//   - *SiteMap: Initialized sitemap ready for crawling
 func NewSiteMap(url *url.URL, validator DomainValidator, urlValidators []UrlValidator, priority Priority) *SiteMap {
 	return &SiteMap{
 		url:             url,
@@ -318,8 +503,17 @@ func NewSiteMap(url *url.URL, validator DomainValidator, urlValidators []UrlVali
 	}
 }
 
+// GetURL retrieves sitemap metadata for a specific URL.
+//
+// This method is thread-safe and uses a read lock to allow concurrent access.
+//
+// Parameters:
+//   - url: URL to look up
+//
+// Returns:
+//   - *sitemap.URL: Sitemap metadata if found, nil otherwise
+//   - bool: true if URL exists in the sitemap, false otherwise
 func (s *SiteMap) GetURL(url *url.URL) (*sitemap.URL, bool) {
-
 	urlString := url.String()
 
 	s.rwl.RLock()
@@ -328,9 +522,22 @@ func (s *SiteMap) GetURL(url *url.URL) (*sitemap.URL, bool) {
 	return ret, ok
 }
 
-// appendURL returns true if the url should be crawled. If true is returned
-// it is assumed that the caller will crawl this URL and subsequent calls to
-// appendURL will return false.
+// appendURL attempts to add a URL to the sitemap for crawling.
+//
+// This method performs several checks:
+//  1. Domain validation (must be same domain as root)
+//  2. URL validation (must pass all configured validators)
+//  3. Duplicate detection (skip if already crawled)
+//
+// The method uses a double-check locking pattern:
+//   - First check with read lock (fast path for duplicates)
+//   - Second check with write lock (handles race conditions)
+//
+// Parameters:
+//   - url: URL to potentially add
+//
+// Returns:
+//   - bool: true if URL was added and should be crawled, false if skipped
 func (s *SiteMap) appendURL(url *url.URL) bool {
 	// We shouldn't crawl if the url is not valid or is in an external domain
 	if !s.domainValidator.Validate(s.url, url) {
@@ -377,14 +584,32 @@ func (s *SiteMap) appendURL(url *url.URL) bool {
 	s.rwl.Unlock()
 	return crawl
 }
-func (s *SiteMap) updatedMod(url *url.URL) bool {
 
+// updatedMod updates the last-modified time for a URL in the sitemap.
+//
+// This method is called when a page is crawled to record when it was last
+// accessed or when a last-modified time is extracted from the page content.
+//
+// Parameters:
+//   - url: URL to update
+//   - extractedTime: Last-modified time extracted from page content (nil for current time)
+//
+// Returns:
+//   - bool: true if the URL was found and updated, false if URL not in sitemap
+func (s *SiteMap) updatedMod(url *url.URL, extractedTime *time.Time) bool {
 	urlString := url.String()
-
 	s.rwl.Lock()
 	defer s.rwl.Unlock()
 	val := s.sitemapURLS[urlString]
-	if val != nil {
+	if val == nil {
+		return false
+	}
+	if extractedTime != nil {
+		val.LastMod = extractedTime
+		return true
+	}
+
+	if val.LastMod == nil {
 		t := time.Now()
 		val.LastMod = &t
 		return true
@@ -393,7 +618,16 @@ func (s *SiteMap) updatedMod(url *url.URL) bool {
 	return false
 }
 
-// WriteMap writes the ordered site map to a given writer.
+// WriteMap writes all discovered URLs to the provided writer, one per line.
+//
+// URLs are sorted alphabetically for consistent output. This method is
+// useful for debugging or generating a simple text list of crawled URLs.
+//
+// Note: This outputs plain text URLs, not XML format. Use the sitemap
+// package's WriteTo method for XML output.
+//
+// Parameters:
+//   - out: Writer to output URLs to
 func (s *SiteMap) WriteMap(out io.Writer) {
 	s.rwl.RLock()
 	defer s.rwl.RUnlock()
@@ -410,52 +644,96 @@ func (s *SiteMap) WriteMap(out io.Writer) {
 	}
 }
 
+// GetURLS returns a copy of all sitemap URL metadata.
+//
+// Returns:
+//   - map[string]*sitemap.URL: Map of URL strings to their metadata
+//
+// Note: The returned map is the internal map. For thread-safe access,
+// ensure the crawl has completed or use GetURL for individual lookups.
 func (s *SiteMap) GetURLS() map[string]*sitemap.URL {
-
 	return s.sitemapURLS
 }
 
-// LinkReader is an iterative structure that allows for reading all href tags
-// in a given URL. The link reader will make the http request to the specified
-// url and allow for reading through all links in the returned page. When there
-// are no more links in the page Read returns io.EOF. The consumer is
-// responsible for closing the LinkReader when done to ensure and client http
-// requests are cleaned up.
+// LinkReader is an iterative parser that extracts all href links from an HTML page.
+//
+// The LinkReader:
+//  1. Fetches the page content via HTTP
+//  2. Parses HTML using a streaming tokenizer (memory efficient)
+//  3. Extracts href attributes from anchor (<a>) tags
+//  4. Returns links one at a time via the Read() method
+//
+// The reader also optionally extracts last-modified times from page content
+// when configured via EventCallbackReadLink.
+//
+// Usage:
+//
+//	reader := NewLinkReader(url, client, config)
+//	for {
+//	    link, err := reader.Read()
+//	    if err == io.EOF {
+//	        break
+//	    }
+//	    // Process link...
+//	}
 type LinkReader struct {
-	client   *http.Client
-	pageURL  *url.URL
-	response *http.Response
-	doc      *html.Tokenizer
-	done     bool
+	client      *http.Client    // HTTP client for fetching page content
+	pageURL     *url.URL        // URL of the page being read
+	content     []byte          // Cached page content (loaded on first Read)
+	doc         *html.Tokenizer // HTML tokenizer for streaming parsing
+	lastModTime *time.Time      // Extracted last-modified time (optional)
+	config      *Config         // Crawler configuration
+	done        bool            // Flag indicating all links have been read
 }
 
-// NewLinkReader returns a LinkReader for the specified URL, fetching the
-// content with the specified client
-func NewLinkReader(pageURL *url.URL, client *http.Client) *LinkReader {
+// NewLinkReader creates a new LinkReader for the specified URL.
+//
+// The LinkReader does not fetch the page content immediately. The HTTP
+// request is deferred until the first call to Read().
+//
+// Parameters:
+//   - pageURL: URL of the page to parse
+//   - client: HTTP client for fetching content
+//   - config: Crawler configuration (used for callback functions)
+//
+// Returns:
+//   - *LinkReader: Initialized reader ready to extract links
+func NewLinkReader(pageURL *url.URL, client *http.Client, config *Config) *LinkReader {
 	return &LinkReader{
 		client:  client,
 		pageURL: pageURL,
+		config:  config,
 	}
 }
 
-// Read returns the next href in the html document
+// Read returns the next href link found in the HTML document.
+//
+// This method:
+//  1. Fetches the page content on first call (if not already cached)
+//  2. Handles HTTP redirects by returning the redirect location
+//  3. Uses streaming HTML parsing for memory efficiency
+//  4. Returns io.EOF when all links have been read
+//
+// Special cases:
+//   - HTTP redirects (3xx): Returns the redirect location and sets done=true
+//   - Parse errors: Returns the error (usually io.EOF at end of document)
+//
+// Returns:
+//   - string: The href attribute value of the next link
+//   - error: io.EOF when no more links, or error if parsing failed
 func (u *LinkReader) Read() (string, error) {
 	if u.done {
 		return "", io.EOF
 	}
 
-	if u.doc == nil {
+	if u.content == nil {
+		// If the response is a redirect we should read the location header
+		// It is valid for 201 to return a location header but this should
+		// not happen as a response to http GET
 		resp, respErr := u.client.Get(u.pageURL.String())
 		if respErr != nil {
 			return "", fmt.Errorf("http get error: %q", respErr)
 		}
-
-		u.response = resp
-		u.doc = html.NewTokenizer(resp.Body)
-
-		// If the response is a redirect we should read the location header
-		// It is valid for 201 to return a location header but this should
-		// not happen as a response to http GET
 		if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
 			if err := resp.Body.Close(); err != nil {
 				return "", err
@@ -467,6 +745,17 @@ func (u *LinkReader) Read() (string, error) {
 			u.done = true
 			return locationURL.String(), nil
 		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		resp.Body.Close()
+		u.content = body
+	}
+
+	if u.doc == nil {
+		u.doc = html.NewTokenizer(io.NopCloser(bytes.NewReader(u.content)))
 	}
 
 	// Read the href attributes from all a tags using a streaming tokenizer
@@ -474,9 +763,6 @@ func (u *LinkReader) Read() (string, error) {
 		tt := u.doc.Next()
 		switch tt {
 		case html.ErrorToken:
-			if closeErr := u.response.Body.Close(); closeErr != nil {
-				return "", closeErr
-			}
 			return "", u.doc.Err()
 		case html.StartTagToken:
 			tn, hasAttr := u.doc.TagName()
@@ -497,19 +783,35 @@ func (u *LinkReader) Read() (string, error) {
 	}
 }
 
-// Close cleans up any remaining client response. If all links are read from
-// the link reader the body will be automatically closed, however if only the
-// first N links are required, the body must be closed by the caller.
-func (u *LinkReader) Close() error {
-	u.done = true
-	if u.response != nil {
-		return u.response.Body.Close()
-	}
-
-	return nil
-}
-
-// URL returns the read-only url string that was used to make the client request
+// URL returns the URL string of the page being read.
+//
+// Returns:
+//   - string: The page URL as a string
 func (u *LinkReader) URL() string {
 	return u.pageURL.String()
+}
+
+// GetBody returns the raw HTML content of the page.
+//
+// This is useful for extracting additional metadata from the page content,
+// such as last-modified times embedded in the HTML.
+//
+// Returns:
+//   - []byte: Raw HTML content (nil if page not yet fetched)
+func (u *LinkReader) GetBody() []byte {
+	return u.content
+}
+
+// SetlastModTime sets the extracted last-modified time for the page.
+//
+// This method is typically called by the EventCallbackReadLink callback
+// after parsing the page content for timestamp information.
+//
+// Parameters:
+//   - t: Last-modified time to store
+//
+// Note: Method name contains a typo (should be "SetLastModTime") but is
+// kept for backward compatibility.
+func (u *LinkReader) SetlastModTime(t *time.Time) {
+	u.lastModTime = t
 }

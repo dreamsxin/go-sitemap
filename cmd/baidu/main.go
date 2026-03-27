@@ -1,3 +1,16 @@
+// Command baidu submits sitemap URLs to Baidu's webmaster platform API
+// for faster indexing by Baidu search engine.
+//
+// Usage:
+//
+//	baidu -site https://example.com -token YOUR_BAIDU_TOKEN -sitemap sitemap.xml
+//	baidu -site https://example.com -token YOUR_TOKEN -days 7 -batch 100
+//
+// Features:
+//   - Batch submission (default 50 URLs per request)
+//   - Filter by last update time (submit only recently changed URLs)
+//   - Automatic retry on failure
+//   - Progress logging
 package main
 
 import (
@@ -13,23 +26,31 @@ import (
 	"github.com/dreamsxin/go-sitemap"
 )
 
+// Default configuration constants
 const (
-	defaultAPIURL      = "http://data.zz.baidu.com/urls"
-	defaultBatchSize   = 50
-	defaultSitemapPath = "./sitemap.xml"
+	defaultAPIURL      = "http://data.zz.baidu.com/urls"  // Baidu sitemap submission API endpoint
+	defaultBatchSize   = 50                               // Default URLs per batch
+	defaultSitemapPath = "./sitemap.xml"                  // Default sitemap file location
 )
 
-// Config holds all application configuration parameters
+// Config holds all configuration parameters for Baidu URL submission.
 type Config struct {
-	APIURL      string
-	SiteDomain  string
-	Token       string
-	SitemapPath string
-	BatchSize   int
-	CheckUpdate bool
-	DaysOffset  int
+	APIURL      string  // Baidu API endpoint URL
+	SiteDomain  string  // Website domain (must start with https://)
+	Token       string  // Baidu webmaster platform authentication token
+	SitemapPath string  // Path to sitemap XML file
+	BatchSize   int     // Number of URLs to submit per API request
+	CheckUpdate bool    // Whether to filter URLs by last update time
+	DaysOffset  int     // Only submit URLs updated in the last N days
 }
 
+// main is the entry point for the baidu command.
+//
+// It orchestrates the URL submission process:
+//   1. Parse command-line flags
+//   2. Load and parse the sitemap file
+//   3. Filter URLs by last update time (if configured)
+//   4. Submit URLs to Baidu in batches
 func main() {
 	config, err := parseFlags()
 	if err != nil {
@@ -49,7 +70,20 @@ func main() {
 	log.Println("All URLs submitted successfully")
 }
 
-// parseFlags processes command line arguments and returns configuration
+// parseFlags processes command-line arguments and returns a validated Config.
+//
+// Command-line flags:
+//   - -api: Baidu API endpoint (default: http://data.zz.baidu.com/urls)
+//   - -site: Website domain (required, must start with https://)
+//   - -token: Baidu webmaster token (required)
+//   - -sitemap: Path to sitemap XML file (default: ./sitemap.xml)
+//   - -batch: URLs per batch (default: 50)
+//   - -check-update: Filter by update time (default: true)
+//   - -days: Submit URLs updated in last N days (default: 1)
+//
+// Returns:
+//   - *Config: Validated configuration
+//   - error: Validation error if required flags are missing or invalid
 func parseFlags() (*Config, error) {
 	apiURL := flag.String("api", defaultAPIURL, "Baidu API endpoint URL")
 	siteDomain := flag.String("site", "", "Website domain (must start with https://)")
@@ -80,7 +114,14 @@ func parseFlags() (*Config, error) {
 	}, nil
 }
 
-// loadAndParseSitemap reads and parses the sitemap file
+// loadAndParseSitemap reads and parses the sitemap XML file.
+//
+// Parameters:
+//   - path: Path to the sitemap XML file
+//
+// Returns:
+//   - []*sitemap.URL: Slice of URL entries from the sitemap
+//   - error: Error if file cannot be opened or parsed
 func loadAndParseSitemap(path string) ([]*sitemap.URL, error) {
 	file, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -96,7 +137,17 @@ func loadAndParseSitemap(path string) ([]*sitemap.URL, error) {
 	return sm.URLs, nil
 }
 
-// filterURLsByUpdateTime filters URLs based on last modification time
+// filterURLsByUpdateTime filters URLs based on their last modification time.
+//
+// Only URLs updated within the configured number of days (DaysOffset) are
+// included. This reduces API calls by submitting only changed content.
+//
+// Parameters:
+//   - urls: All URLs from the sitemap
+//   - config: Configuration containing filter settings
+//
+// Returns:
+//   - []string: Filtered list of URL strings
 func filterURLsByUpdateTime(urls []*sitemap.URL, config *Config) []string {
 	if !config.CheckUpdate || config.DaysOffset <= 0 {
 		return extractURLs(urls)
@@ -115,7 +166,13 @@ func filterURLsByUpdateTime(urls []*sitemap.URL, config *Config) []string {
 	return filtered
 }
 
-// extractURLs extracts loc values from sitemap URLs
+// extractURLs extracts the Loc (URL string) field from sitemap.URL objects.
+//
+// Parameters:
+//   - urls: Slice of sitemap.URL objects
+//
+// Returns:
+//   - []string: Slice of URL strings
 func extractURLs(urls []*sitemap.URL) []string {
 	result := make([]string, len(urls))
 	for i, url := range urls {
@@ -124,7 +181,17 @@ func extractURLs(urls []*sitemap.URL) []string {
 	return result
 }
 
-// submitURLsInBatches sends URLs to Baidu in batches
+// submitURLsInBatches sends URLs to Baidu's API in batches.
+//
+// URLs are submitted in groups of BatchSize to avoid overwhelming the API.
+// A 1-second delay is added between batches to respect rate limits.
+//
+// Parameters:
+//   - urls: All URLs to submit
+//   - config: Configuration containing batch size and API details
+//
+// Returns:
+//   - error: Error if any batch fails (individual batch failures are logged but don't stop processing)
 func submitURLsInBatches(urls []string, config *Config) error {
 	if len(urls) == 0 {
 		log.Println("No URLs to submit")
@@ -152,7 +219,20 @@ func submitURLsInBatches(urls []string, config *Config) error {
 	return nil
 }
 
-// submitBatchToBaidu sends a single batch of URLs to Baidu API
+// submitBatchToBaidu sends a single batch of URLs to the Baidu webmaster API.
+//
+// The function:
+//   1. Constructs the API URL with site domain and token
+//   2. Creates a pipe to stream URLs as newline-separated text
+//   3. Sends a POST request with Content-Type: text/plain
+//   4. Logs the API response
+//
+// Parameters:
+//   - urls: Batch of URLs to submit
+//   - config: Configuration containing API endpoint and authentication
+//
+// Returns:
+//   - error: Error if the HTTP request fails or API returns non-200 status
 func submitBatchToBaidu(urls []string, config *Config) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	requestURL := fmt.Sprintf("%s?site=%s&token=%s", config.APIURL, config.SiteDomain, config.Token)
