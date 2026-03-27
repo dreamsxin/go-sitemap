@@ -93,6 +93,8 @@ type DomainCrawler struct {
 	pendingURLSRemaining *sync.WaitGroup // Tracks active crawl operations
 	accessedPageCount    atomic.Uint64   // Count of successfully accessed pages
 	timedOut             atomic.Bool     // Flag indicating if crawl timeout was reached
+	closed               bool            // Flag indicating if pendingURLS channel is closed
+	mu                   sync.Mutex      // Protects closed flag and channel writes
 }
 
 // NewDomainCrawler creates and initializes a new DomainCrawler instance.
@@ -123,26 +125,45 @@ func NewDomainCrawler(root *url.URL, config *Config) (*DomainCrawler, error) {
 	var pendingURLSRemaining sync.WaitGroup
 	pendingURLSRemaining.Add(1)
 
-	if config.SitemapURLS != nil {
-		siteMap.sitemapURLS = config.SitemapURLS
-
-		for _, sitemapURL := range siteMap.sitemapURLS {
-			siteMap.siteURLS[sitemapURL.Loc] = true
-			loc, err := url.Parse(sitemapURL.Loc)
-			if err == nil {
-				pendingURLS <- loc
-				pendingURLSRemaining.Add(1)
-			}
-		}
-	}
-
-	return &DomainCrawler{
+	crawler := &DomainCrawler{
 		root:                 root,
 		config:               config,
 		siteMap:              siteMap,
 		pendingURLS:          pendingURLS,
 		pendingURLSRemaining: &pendingURLSRemaining,
-	}, nil
+	}
+
+	if config.SitemapURLS != nil {
+		siteMap.sitemapURLS = config.SitemapURLS
+
+		// Seed the pending queue in a goroutine to avoid deadlock when the
+		// number of pre-existing URLs exceeds the channel buffer capacity.
+		pendingURLSRemaining.Add(1)
+		go func() {
+			defer pendingURLSRemaining.Done()
+			for _, sitemapURL := range config.SitemapURLS {
+				siteMap.siteURLS[sitemapURL.Loc] = true
+				loc, err := url.Parse(sitemapURL.Loc)
+				if err != nil {
+					continue
+				}
+				crawler.mu.Lock()
+				if !crawler.closed {
+					select {
+					case pendingURLS <- loc:
+						pendingURLSRemaining.Add(1)
+					default:
+						config.Logger.Error("too many sitemap urls, url will be ignored",
+							zap.String("url", sitemapURL.Loc),
+						)
+					}
+				}
+				crawler.mu.Unlock()
+			}
+		}()
+	}
+
+	return crawler, nil
 }
 
 // Crawl executes the domain crawl and returns the generated sitemap.
@@ -184,7 +205,10 @@ func (crawler *DomainCrawler) Crawl() (*SiteMap, error) {
 	}
 
 	crawler.pendingURLSRemaining.Wait()
+	crawler.mu.Lock()
 	close(crawler.pendingURLS)
+	crawler.closed = true
+	crawler.mu.Unlock()
 
 	if crawler.accessedPageCount.Load() == 0 {
 		return nil, fmt.Errorf("unable to access url %s", crawler.root.String())
@@ -210,36 +234,45 @@ func (crawler *DomainCrawler) drainURLS() {
 	logger := crawler.config.Logger
 	validator := crawler.config.CrawlValidator
 	for pageURL := range crawler.pendingURLS {
-		logger.Debug("crawling page for links",
-			zap.String("url", pageURL.String()),
-		)
+		func() {
+			defer crawler.pendingURLSRemaining.Done()
 
-		siteurl, ok := crawler.siteMap.GetURL(pageURL)
-		crawler.siteMap.updatedMod(pageURL, nil)
-		if crawler.timedOut.Load() {
-			logger.Debug("skipping url due to timeout",
+			logger.Debug("crawling page for links",
 				zap.String("url", pageURL.String()),
 			)
-		} else if ok && validator != nil && !validator(siteurl) {
-			logger.Debug("skipping url due to validator",
-				zap.String("url", pageURL.String()),
-			)
-		} else {
+
+			siteurl, ok := crawler.siteMap.GetURL(pageURL)
+			if !ok {
+				logger.Error("crawling page for links: url not found in sitemap",
+					zap.String("url", pageURL.String()),
+				)
+			}
+			if validator != nil && !validator(siteurl) {
+				logger.Debug("skipping url due to validator", zap.String("url", pageURL.String()))
+				return
+			}
+			if crawler.timedOut.Load() {
+				logger.Debug("skipping url due to timeout",
+					zap.String("url", pageURL.String()),
+				)
+				return
+			}
+			if ok {
+				crawler.siteMap.updatedMod(pageURL, nil)
+			}
 			linkReader := NewLinkReader(pageURL, client, crawler.config)
-			crawler.realAllLinks(linkReader)
+			crawler.readAllLinks(linkReader)
+			if linkReader.content != nil {
+				crawler.accessedPageCount.Add(1)
+			}
 			if linkReader.lastModTime != nil {
 				crawler.siteMap.updatedMod(pageURL, linkReader.lastModTime)
 			}
-		}
-
-		crawler.pendingURLSRemaining.Done()
+		}()
 	}
 }
 
-// realAllLinks reads all links from a page and queues unseen URLs for crawling.
-//
-// Note: Function name contains a typo (should be "readAllLinks") but is kept
-// for backward compatibility.
+// readAllLinks reads all links from a page and queues unseen URLs for crawling.
 //
 // This method:
 //  1. Iterates through all links discovered by the LinkReader
@@ -255,7 +288,7 @@ func (crawler *DomainCrawler) drainURLS() {
 //
 // Parameters:
 //   - linkReader: LinkReader instance for the current page
-func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
+func (crawler *DomainCrawler) readAllLinks(linkReader *LinkReader) {
 	logger := crawler.config.Logger
 	callback := crawler.config.EventCallbackReadLink
 
@@ -275,8 +308,6 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 			}
 			break
 		}
-
-		crawler.accessedPageCount.Add(1)
 
 		hrefURL, hrefParseErr := url.Parse(hrefString)
 		if hrefParseErr != nil {
@@ -301,19 +332,29 @@ func (crawler *DomainCrawler) realAllLinks(linkReader *LinkReader) {
 			// buffered channel could be full and the write would block
 			// here. If all goroutines were blocked on writing to the
 			// channel this would deadlock.
-			select {
-			case crawler.pendingURLS <- hrefResolved:
-				logger.Debug("page appended to channel",
+			// Also, we need to check if the channel has been closed to
+			// avoid panic when sending to a closed channel.
+			crawler.mu.Lock()
+			if !crawler.closed {
+				select {
+				case crawler.pendingURLS <- hrefResolved:
+					logger.Debug("page appended to channel",
+						zap.String("page", hrefResolved.String()),
+					)
+					crawler.pendingURLSRemaining.Add(1)
+				default:
+					// If the buffered channel is full we ran out of memory
+					logger.Error("too many pending urls, page will be ignored",
+						zap.String("page", hrefResolved.String()),
+						zap.String("link", linkReader.URL()),
+					)
+				}
+			} else {
+				logger.Debug("channel closed, skipping new url",
 					zap.String("page", hrefResolved.String()),
-				)
-				crawler.pendingURLSRemaining.Add(1)
-			default:
-				// If the buffered channel is full we ran out of memory
-				logger.Error("too many pending urls, page will be ignored",
-					zap.String("page", hrefResolved.String()),
-					zap.String("link", linkReader.URL()),
 				)
 			}
+			crawler.mu.Unlock()
 			if callback != nil {
 				callback(hrefResolved, linkReader)
 			}
@@ -432,8 +473,7 @@ func GetPriority(link *url.URL) float32 {
 	num := 0
 	path := strings.Trim(link.Path, "/")
 	if path != "" {
-		parts := strings.Split(path, "/")
-		num = len(parts)
+		num = strings.Count(path, "/") + 1
 	}
 	switch num {
 	case 0:
@@ -515,6 +555,7 @@ func NewSiteMap(url *url.URL, validator DomainValidator, urlValidators []UrlVali
 //   - bool: true if URL exists in the sitemap, false otherwise
 func (s *SiteMap) GetURL(url *url.URL) (*sitemap.URL, bool) {
 	urlString := url.String()
+	urlString = strings.TrimRight(urlString, "/")
 
 	s.rwl.RLock()
 	defer s.rwl.RUnlock()
@@ -551,6 +592,7 @@ func (s *SiteMap) appendURL(url *url.URL) bool {
 	}
 
 	urlString := url.String()
+	urlString = strings.TrimRight(urlString, "/")
 
 	// We could always lock over a normal mutex, but by using a RWMutex
 	// we should increase the throughput of checking duplicate urls.
@@ -569,17 +611,14 @@ func (s *SiteMap) appendURL(url *url.URL) bool {
 	// in a race condition, so reading again is necessary after acquiring the
 	// write lock.
 	s.rwl.Lock()
-	//t := time.Now()
 	crawl := !s.siteURLS[urlString]
-	s.siteURLS[urlString] = true
-
-	urlString = strings.TrimRight(urlString, "/")
-
-	s.sitemapURLS[urlString] = &sitemap.URL{
-		Loc: urlString,
-		//LastMod:    &t,
-		ChangeFreq: sitemap.Daily,
-		Priority:   s.priority.Get(url),
+	if crawl {
+		s.siteURLS[urlString] = true
+		s.sitemapURLS[urlString] = &sitemap.URL{
+			Loc:        urlString,
+			ChangeFreq: sitemap.Daily,
+			Priority:   s.priority.Get(url),
+		}
 	}
 	s.rwl.Unlock()
 	return crawl
@@ -597,7 +636,7 @@ func (s *SiteMap) appendURL(url *url.URL) bool {
 // Returns:
 //   - bool: true if the URL was found and updated, false if URL not in sitemap
 func (s *SiteMap) updatedMod(url *url.URL, extractedTime *time.Time) bool {
-	urlString := url.String()
+	urlString := strings.TrimRight(url.String(), "/")
 	s.rwl.Lock()
 	defer s.rwl.Unlock()
 	val := s.sitemapURLS[urlString]
@@ -646,13 +685,19 @@ func (s *SiteMap) WriteMap(out io.Writer) {
 
 // GetURLS returns a copy of all sitemap URL metadata.
 //
-// Returns:
-//   - map[string]*sitemap.URL: Map of URL strings to their metadata
+// The returned map is a snapshot; modifications to it will not affect
+// the internal state. This method is thread-safe.
 //
-// Note: The returned map is the internal map. For thread-safe access,
-// ensure the crawl has completed or use GetURL for individual lookups.
+// Returns:
+//   - map[string]*sitemap.URL: Snapshot of URL strings to their metadata
 func (s *SiteMap) GetURLS() map[string]*sitemap.URL {
-	return s.sitemapURLS
+	s.rwl.RLock()
+	defer s.rwl.RUnlock()
+	copy := make(map[string]*sitemap.URL, len(s.sitemapURLS))
+	for k, v := range s.sitemapURLS {
+		copy[k] = v
+	}
+	return copy
 }
 
 // LinkReader is an iterative parser that extracts all href links from an HTML page.
@@ -746,11 +791,11 @@ func (u *LinkReader) Read() (string, error) {
 			return locationURL.String(), nil
 		}
 
+		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return "", err
 		}
-		resp.Body.Close()
 		u.content = body
 	}
 
@@ -802,16 +847,13 @@ func (u *LinkReader) GetBody() []byte {
 	return u.content
 }
 
-// SetlastModTime sets the extracted last-modified time for the page.
+// SetLastModTime sets the extracted last-modified time for the page.
 //
 // This method is typically called by the EventCallbackReadLink callback
 // after parsing the page content for timestamp information.
 //
 // Parameters:
 //   - t: Last-modified time to store
-//
-// Note: Method name contains a typo (should be "SetLastModTime") but is
-// kept for backward compatibility.
-func (u *LinkReader) SetlastModTime(t *time.Time) {
+func (u *LinkReader) SetLastModTime(t *time.Time) {
 	u.lastModTime = t
 }

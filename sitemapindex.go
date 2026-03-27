@@ -37,7 +37,8 @@ type SitemapIndex struct {
 
 	URLs []*URL `xml:"sitemap"`
 
-	Minify bool `xml:"-"`
+	Minify          bool `xml:"-"`
+	SkipWriteHeader bool `xml:"-"` // If true, omit the XML declaration header
 }
 
 // NewSitemapIndex creates and initializes a new SitemapIndex instance with
@@ -82,9 +83,11 @@ func (s *SitemapIndex) Add(u *URL) {
 func (s *SitemapIndex) WriteTo(w io.Writer) (n int64, err error) {
 	cw := diagio.NewCounterWriter(w)
 
-	_, err = cw.Write([]byte(xml.Header))
-	if err != nil {
-		return cw.Count(), err
+	if !s.SkipWriteHeader {
+		_, err = cw.Write([]byte(xml.Header))
+		if err != nil {
+			return cw.Count(), err
+		}
 	}
 	en := xml.NewEncoder(cw)
 	if !s.Minify {

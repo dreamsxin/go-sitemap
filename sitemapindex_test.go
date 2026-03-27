@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,39 @@ func TestSitemapIndex_WriteToError(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("WriteTo did not propagate error")
+	}
+}
+
+func TestSitemapIndex_SkipWriteHeader(t *testing.T) {
+	smi := sitemap.NewSitemapIndex()
+	smi.SkipWriteHeader = true
+	smi.Add(&sitemap.URL{Loc: "http://example.com/sitemap-1.xml"})
+
+	var buf bytes.Buffer
+	_, err := smi.WriteTo(&buf)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "<?xml") {
+		t.Error("SkipWriteHeader=true should omit the XML declaration")
+	}
+	if !strings.Contains(out, "<sitemapindex") {
+		t.Error("expected <sitemapindex> element in output")
+	}
+}
+
+func TestSitemapIndex_WriteHeader(t *testing.T) {
+	smi := sitemap.NewSitemapIndex()
+	smi.Add(&sitemap.URL{Loc: "http://example.com/sitemap-1.xml"})
+
+	var buf bytes.Buffer
+	_, err := smi.WriteTo(&buf)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	if !strings.HasPrefix(buf.String(), "<?xml") {
+		t.Error("expected XML declaration at start of output")
 	}
 }
 

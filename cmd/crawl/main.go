@@ -46,8 +46,9 @@ const (
 // Settings holds per-path configuration for extracting last-modified times
 // from page content using regex patterns.
 type Settings struct {
-	LastModRegex  string `json:"lastmod-regex"`  // Regex pattern to match timestamp in HTML
-	LastModFormat string `json:"lastmod-format"` // Time format for parsing (empty = RFC3339)
+	LastModRegex  string         `json:"lastmod-regex"`  // Regex pattern to match timestamp in HTML
+	LastModFormat string         `json:"lastmod-format"` // Time format for parsing (empty = RFC3339)
+	compiledRegex *regexp.Regexp // Pre-compiled regex (not serialized)
 }
 
 // main is the entry point for the crawl command.
@@ -69,6 +70,8 @@ func main() {
 	intervalPtr := flag.Duration("i", interval, "change frequency interval")
 	priorityfile := flag.String("p", "", "priority file")
 	settingfile := flag.String("s", "", "setting file")
+	md5Ptr := flag.Bool("md5", false, "enable MD5")
+	md5file := flag.String("md5file", "sitemap.md5", "MD5 store file path")
 	// 忽略带有 query 的 url
 	skipquery := flag.Bool("skip-query", false, "skip query")
 	skipfragment := flag.Bool("skip-fragment", false, "skip fragment")
@@ -114,7 +117,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("read priority file error: %s", err)
 		}
-		json.Unmarshal(b, &priorityMap)
+		if err := json.Unmarshal(b, &priorityMap); err != nil {
+			log.Fatalf("parse priority file error: %s", err)
+		}
 	}
 
 	// Load settings for extracting last-modified times from page content
@@ -124,7 +129,20 @@ func main() {
 		if err != nil {
 			log.Fatalf("read setting file error: %s", err)
 		}
-		json.Unmarshal(b, &settings)
+		if err := json.Unmarshal(b, &settings); err != nil {
+			log.Fatalf("parse setting file error: %s", err)
+		}
+		// Pre-compile all regexes once at startup
+		for k, s := range settings {
+			if s.LastModRegex != "" {
+				r, err := regexp.Compile(s.LastModRegex)
+				if err != nil {
+					log.Fatalf("invalid regex for %q: %s", k, err)
+				}
+				s.compiledRegex = r
+				settings[k] = s
+			}
+		}
 	}
 
 	// Create HTTP client with custom TLS config (skip certificate verification)
@@ -146,27 +164,33 @@ func main() {
 	}
 
 	if *outfile == "" {
-		log.Fatal("output file name cant't empay")
+		log.Fatal("output file name can't be empty")
 	}
 
 	// Load existing sitemap URLs for incremental crawling
 	// This preserves last-modified times and allows skipping recently updated pages
 	oldurls := make(map[string]*sitemap.URL)
-	if *intervalPtr > 0 {
+	{
 		// 读取文件内容
 		file, err := os.OpenFile(*outfile, os.O_RDONLY, os.ModePerm)
 		if err != nil {
 			log.Printf("error: %s\n", err)
 		} else {
-			defer file.Close()
 			sm := sitemap.New()
 			sm.ReadFrom(file)
+			file.Close()
 
 			for _, v := range sm.URLs {
 				oldurls[v.Loc] = v
 			}
 		}
 	}
+
+	md5store, err := NewMD5Store(*md5file)
+	if err != nil {
+		log.Fatalf("error: %s", err)
+	}
+	defer md5store.Save()
 
 	nowtime := time.Now()
 
@@ -211,12 +235,10 @@ func main() {
 					if strings.Contains(hrefResolved.Path, m) {
 						logger.Debug("extractLastModTime", zap.String("url", linkReader.URL()), zap.Any("regex", setting.LastModRegex))
 
-						regex, err := regexp.Compile(setting.LastModRegex)
-						if err != nil {
-							logger.Error("extractLastModTime", zap.Error(err))
+						if setting.compiledRegex == nil {
 							return
 						}
-						matches := regex.FindSubmatch(linkReader.GetBody())
+						matches := setting.compiledRegex.FindSubmatch(linkReader.GetBody())
 						if len(matches) < 2 {
 							logger.Debug("extractLastModTime", zap.String("url", linkReader.URL()), zap.Any("regex", setting.LastModRegex), zap.Any("msg", "not match"),
 								zap.Any("matches", matches),
@@ -239,12 +261,24 @@ func main() {
 							)
 							return
 						}
-						linkReader.SetlastModTime(&t)
+						linkReader.SetLastModTime(&t)
 						logger.Debug("extractLastModTime", zap.String("url", linkReader.URL()),
 							zap.Any("time", t.String()),
 						)
 						return
 					}
+				}
+			}
+
+			if *md5Ptr {
+				md5value := CalculateMD5(linkReader.GetBody())
+				if md5store.HasChanged(linkReader.URL(), md5value) {
+					md5store.SetMD5(linkReader.URL(), md5value)
+					t := time.Now()
+					linkReader.SetLastModTime(&t)
+					logger.Debug("extractLastModTime", zap.String("url", linkReader.URL()),
+						zap.Any("time", t.String()),
+					)
 				}
 			}
 

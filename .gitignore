@@ -4,3 +4,5 @@ logs
 *.xml
 *.json
 *.exe
+coverage
+.*
