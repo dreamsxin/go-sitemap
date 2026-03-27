@@ -203,6 +203,15 @@ func main() {
 		crawl.SetClient(client),
 		crawl.SetLogger(logger),
 		crawl.SetSitemapURLS(oldurls),
+		crawl.SetUrlValidator(crawl.UrlValidatorFunc(func(link *url.URL) bool {
+			if strings.Contains(link.Path, "www.") {
+				return false
+			}
+			if strings.Contains(link.Path, ".com") {
+				return false
+			}
+			return true
+		})),
 		// Crawl validator: skip URLs that haven't changed since last crawl
 		crawl.SetCrawlValidator(func(v *sitemap.URL) bool {
 			if v != nil {
